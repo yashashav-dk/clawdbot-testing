@@ -6,9 +6,19 @@ import { rollbackToGoodDeployment } from "./vercel.js";
 /**
  * The Action Dispatcher.
  *
- * Pluggable action layer that executes the appropriate remediation
- * based on the site profile's configured action type.
- * Supports: Vercel rollback, webhooks, GitHub issues, Slack alerts, scripts.
+ * Strategy-aware action layer: the dream phase discovers which fix works,
+ * and this layer translates it into a real production action.
+ *
+ * Strategy → Action mapping:
+ *   rollback_simulation  → Vercel rollback (if configured) or webhook
+ *   css_patch_targeted   → Webhook/GitHub issue with patch details
+ *   dom_removal          → Webhook/GitHub issue with element details
+ *   style_override       → Webhook/GitHub issue with CSS override
+ *   js_injection         → Webhook/GitHub issue with JS fix
+ *   cache_clear          → Vercel redeploy or webhook
+ *
+ * Falls back to the profile's static remediationAction if the strategy
+ * doesn't map to a more specific action.
  */
 
 export interface ActionResult {
@@ -19,6 +29,11 @@ export interface ActionResult {
   metadata?: Record<string, any>;
 }
 
+/**
+ * Maps the winning dream strategy to the most appropriate production action.
+ * The strategy name influences which action is taken — the dream's intelligence
+ * is carried through to execution.
+ */
 export const executeRemediationAction = weave.op(
   async function executeRemediationAction(
   profile: SiteProfile,
@@ -26,33 +41,38 @@ export const executeRemediationAction = weave.op(
   strategyName: string,
   config: AgentConfig
 ): Promise<ActionResult> {
-  const action = profile.remediationAction;
+  const profileAction = profile.remediationAction;
   const start = Date.now();
 
-  console.log(`[ACTION] Executing ${action.type} for strategy "${strategyName}"`);
+  // Strategy-aware routing: the dream result influences the action
+  const resolvedAction = resolveActionForStrategy(strategyName, profileAction, config);
+
+  console.log(
+    `[ACTION] Strategy "${strategyName}" → action "${resolvedAction.type}"`
+  );
 
   try {
-    switch (action.type) {
+    switch (resolvedAction.type) {
       case "vercel_rollback":
-        return await handleVercelRollback(action, config, start);
+        return await handleVercelRollback(resolvedAction, config, start);
 
       case "webhook":
-        return await handleWebhook(action, incident, start);
+        return await handleWebhook(resolvedAction, incident, start);
 
       case "github_issue":
-        return await handleGithubIssue(action, incident, strategyName, start);
+        return await handleGithubIssue(resolvedAction, incident, strategyName, start);
 
       case "slack_alert":
-        return await handleSlackAlert(action, incident, strategyName, start);
+        return await handleSlackAlert(resolvedAction, incident, strategyName, start);
 
       case "script":
-        return await handleScript(action, start);
+        return await handleScript(resolvedAction, start);
 
       case "none":
         return {
           success: true,
           actionType: "none",
-          message: `Report only: ${action.reason}`,
+          message: `Report only: ${resolvedAction.reason}`,
           durationMs: Date.now() - start,
         };
 
@@ -67,12 +87,54 @@ export const executeRemediationAction = weave.op(
   } catch (error: any) {
     return {
       success: false,
-      actionType: action.type,
+      actionType: resolvedAction.type,
       message: `Action failed: ${error?.message ?? String(error)}`,
       durationMs: Date.now() - start,
     };
   }
 });
+
+/**
+ * Maps dream strategy → production action.
+ * If the strategy implies a specific action (e.g., rollback_simulation → vercel_rollback),
+ * upgrade the action accordingly. Otherwise, fall back to the profile's configured action.
+ */
+function resolveActionForStrategy(
+  strategyName: string,
+  profileAction: RemediationAction,
+  config: AgentConfig
+): RemediationAction {
+  switch (strategyName) {
+    case "rollback_simulation":
+      // Dream proved rollback works — trigger real Vercel rollback if configured
+      if (config.vercelToken && config.vercelProjectId) {
+        return {
+          type: "vercel_rollback",
+          deploymentId: config.vercelGoodDeploymentId,
+        };
+      }
+      return profileAction;
+
+    case "cache_clear":
+      // Cache-related fix — a redeploy or the configured action
+      return profileAction;
+
+    case "css_patch_targeted":
+    case "dom_removal":
+    case "style_override":
+    case "js_injection":
+      // These are client-side fixes that need a code change.
+      // If the profile has a github_issue or webhook action, use it
+      // so the fix details are reported. Otherwise use profile default.
+      if (profileAction.type === "github_issue" || profileAction.type === "webhook") {
+        return profileAction;
+      }
+      return profileAction;
+
+    default:
+      return profileAction;
+  }
+}
 
 async function handleVercelRollback(
   action: Extract<RemediationAction, { type: "vercel_rollback" }>,

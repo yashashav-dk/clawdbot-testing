@@ -222,12 +222,19 @@ export async function runAgentWithProfile(
 
   const bestStrategy = dreamReport.bestStrategy;
   console.log(
-    `[ACT] Executing best strategy: "${bestStrategy.strategy}" (score: ${bestStrategy.score.toFixed(2)})`
+    `[ACT] Best strategy: "${bestStrategy.strategy}" (score: ${bestStrategy.score.toFixed(2)})`
   );
+  console.log(`[ACT] Dream detail: ${bestStrategy.detail}`);
+
+  // Enrich the incident with dream findings before passing to the action layer
+  const enrichedIncident: Incident = {
+    ...incident,
+    description: `${incident.description}\n\nDream analysis: ${bestStrategy.detail}\nDiagnosis: ${dreamReport.diagnosis.rootCause} (${dreamReport.diagnosis.category}, confidence: ${dreamReport.diagnosis.confidence.toFixed(2)})`,
+  };
 
   const actionResult = await executeRemediationAction(
     profile,
-    incident,
+    enrichedIncident,
     bestStrategy.strategy,
     agentConfig
   );
