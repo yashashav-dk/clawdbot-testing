@@ -224,12 +224,38 @@ const executeDream = weave.op(
 
     switch (strategy.name) {
       case "rollback_simulation": {
-        // Simulate rollback by removing the problematic element
-        const result = await removeBlockingElement(
-          page,
-          context.incident.blockingElement
-        );
-        strategyDetail = result.detail;
+        // Simulate rollback by navigating to a previous Vercel deployment URL
+        // This is a true counterfactual: "what if we rolled back to the last good deploy?"
+        try {
+          const { listRecentDeployments } = await import("../actions/vercel.js");
+          const deployments = await listRecentDeployments(config, 5);
+          const currentDeployId = config.vercelGoodDeploymentId;
+
+          // Find the most recent READY deployment that isn't the current one
+          const rollbackTarget = deployments.find(
+            (d) => d.state === "READY" && d.id !== currentDeployId
+          );
+
+          if (rollbackTarget) {
+            // Navigate to the previous deployment's preview URL
+            const rollbackUrl = rollbackTarget.url.startsWith("http")
+              ? rollbackTarget.url
+              : `https://${rollbackTarget.url}`;
+            await page.goto(rollbackUrl, { waitUntil: "networkidle" });
+            strategyDetail = `Simulated rollback: navigated to previous deployment ${rollbackTarget.id} (${rollbackUrl})`;
+          } else {
+            // No alternative deployment found — fall back to page reload
+            await page.reload({ waitUntil: "networkidle" });
+            strategyDetail = "No previous deployment available — simulated rollback via reload";
+          }
+        } catch (e: any) {
+          // Vercel API unavailable — fall back to removing the element as approximation
+          const result = await removeBlockingElement(
+            page,
+            context.incident.blockingElement
+          );
+          strategyDetail = `Vercel API unavailable (${e?.message}) — approximated rollback by removing blocker: ${result.detail}`;
+        }
         break;
       }
 
