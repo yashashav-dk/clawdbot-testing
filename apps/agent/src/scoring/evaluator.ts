@@ -1,3 +1,4 @@
+import * as weave from "weave";
 import { Stagehand } from "@browserbasehq/stagehand";
 import type { DreamResult, AgentConfig } from "../types/index.js";
 import type { SiteProfile, CriticalFlow } from "../types/site-profile.js";
@@ -41,7 +42,8 @@ export function computeScore(breakdown: ScoreBreakdown): number {
  * Runs a full evaluation of a page state after a remediation attempt.
  * Uses the site profile to know what to check.
  */
-export async function evaluatePageHealth(
+export const evaluatePageHealth = weave.op(
+  async function evaluatePageHealth(
   page: any,
   profile?: SiteProfile,
   config?: AgentConfig
@@ -72,7 +74,7 @@ export async function evaluatePageHealth(
 
   breakdown.aggregate = computeScore(breakdown);
   return breakdown;
-}
+});
 
 // ── Reachability Checks ──────────────────────────────────────────────
 

@@ -1,3 +1,4 @@
+import * as weave from "weave";
 import type { AgentConfig, Incident } from "../types/index.js";
 import type { RemediationAction, SiteProfile } from "../types/site-profile.js";
 import { rollbackToGoodDeployment } from "./vercel.js";
@@ -18,7 +19,8 @@ export interface ActionResult {
   metadata?: Record<string, any>;
 }
 
-export async function executeRemediationAction(
+export const executeRemediationAction = weave.op(
+  async function executeRemediationAction(
   profile: SiteProfile,
   incident: Incident,
   strategyName: string,
@@ -70,7 +72,7 @@ export async function executeRemediationAction(
       durationMs: Date.now() - start,
     };
   }
-}
+});
 
 async function handleVercelRollback(
   action: Extract<RemediationAction, { type: "vercel_rollback" }>,

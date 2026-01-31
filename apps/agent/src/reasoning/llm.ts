@@ -1,3 +1,4 @@
+import * as weave from "weave";
 import OpenAI from "openai";
 import type { AgentConfig, Incident } from "../types/index.js";
 import type { SiteProfile } from "../types/site-profile.js";
@@ -8,25 +9,42 @@ import type { SiteProfile } from "../types/site-profile.js";
  * Uses OpenAI (or Cerebras for speed) to perform root cause diagnosis,
  * strategy generation, visual assessment, and post-mortem summarization.
  *
- * This is the "brain" that makes the agent's decisions non-deterministic
- * and capable of reasoning about novel failure modes.
+ * All LLM calls are traced via Weave's wrapOpenAI — token usage, latency,
+ * and request/response pairs appear in the Weave dashboard automatically.
  */
 
-let client: OpenAI | null = null;
+let _client: OpenAI | null = null;
+let _embeddingClient: OpenAI | null = null;
 
 export function getOpenAIClient(config: AgentConfig): OpenAI {
-  if (!client) {
-    // Use Cerebras if available for speed, otherwise OpenAI
-    if (config.cerebrasApiKey) {
-      client = new OpenAI({
-        apiKey: config.cerebrasApiKey,
-        baseURL: "https://api.cerebras.ai/v1",
-      });
-    } else {
-      client = new OpenAI({ apiKey: config.openaiApiKey });
+  if (!_client) {
+    const base = config.cerebrasApiKey
+      ? new OpenAI({
+          apiKey: config.cerebrasApiKey,
+          baseURL: "https://api.cerebras.ai/v1",
+        })
+      : new OpenAI({ apiKey: config.openaiApiKey });
+
+    // Wrap with Weave for automatic LLM call tracing
+    try {
+      _client = weave.wrapOpenAI(base);
+    } catch {
+      _client = base;
     }
   }
-  return client;
+  return _client;
+}
+
+function getEmbeddingClient(config: AgentConfig): OpenAI {
+  if (!_embeddingClient) {
+    const base = new OpenAI({ apiKey: config.openaiApiKey });
+    try {
+      _embeddingClient = weave.wrapOpenAI(base);
+    } catch {
+      _embeddingClient = base;
+    }
+  }
+  return _embeddingClient;
 }
 
 function getModel(config: AgentConfig): string {
@@ -43,32 +61,38 @@ export interface Diagnosis {
   reasoning: string;
 }
 
-export async function diagnoseRootCause(
-  incident: Incident,
-  domSnapshot: string,
-  profile: SiteProfile,
-  config: AgentConfig
-): Promise<Diagnosis> {
-  const openai = getOpenAIClient(config);
+/**
+ * Diagnoses the root cause of an incident using LLM reasoning.
+ * Traced as a Weave op — appears as "diagnoseRootCause" in the trace tree.
+ */
+export const diagnoseRootCause = weave.op(
+  async function diagnoseRootCause(
+    incident: Incident,
+    domSnapshot: string,
+    profile: SiteProfile,
+    config: AgentConfig
+  ): Promise<Diagnosis> {
+    const openai = getOpenAIClient(config);
 
-  const knowledgeContext = profile.knowledgeBase.length > 0
-    ? `\n\nRelevant knowledge:\n${profile.knowledgeBase.map((k, i) => `${i + 1}. ${k}`).join("\n")}`
-    : "";
+    const knowledgeContext =
+      profile.knowledgeBase.length > 0
+        ? `\n\nRelevant knowledge:\n${profile.knowledgeBase.map((k, i) => `${i + 1}. ${k}`).join("\n")}`
+        : "";
 
-  const response = await openai.chat.completions.create({
-    model: getModel(config),
-    temperature: 0.2,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `You are an expert SRE agent diagnosing visual regressions in web applications.
+    const response = await openai.chat.completions.create({
+      model: getModel(config),
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `You are an expert SRE agent diagnosing visual regressions in web applications.
 You analyze DOM snapshots and error messages to determine root causes.
 Always respond with valid JSON.${knowledgeContext}`,
-      },
-      {
-        role: "user",
-        content: `Diagnose this incident:
+        },
+        {
+          role: "user",
+          content: `Diagnose this incident:
 
 Site: ${profile.name} (${profile.url})
 Description: ${profile.description}
@@ -91,29 +115,32 @@ Respond with JSON:
 }
 
 Valid strategies: css_patch_targeted, dom_removal, rollback_simulation, cache_clear, js_injection, style_override`,
-      },
-    ],
-  });
+        },
+      ],
+    });
 
-  try {
-    const parsed = JSON.parse(response.choices[0].message.content ?? "{}");
-    return {
-      rootCause: parsed.rootCause ?? "Unknown",
-      confidence: Math.min(1, Math.max(0, parsed.confidence ?? 0.5)),
-      category: parsed.category ?? "unknown",
-      suggestedStrategies: parsed.suggestedStrategies ?? ["rollback_simulation"],
-      reasoning: parsed.reasoning ?? "",
-    };
-  } catch {
-    return {
-      rootCause: "Failed to parse LLM diagnosis",
-      confidence: 0.3,
-      category: "unknown",
-      suggestedStrategies: ["rollback_simulation", "css_patch_targeted"],
-      reasoning: "LLM response was not valid JSON. Falling back to default strategies.",
-    };
+    try {
+      const parsed = JSON.parse(response.choices[0].message.content ?? "{}");
+      return {
+        rootCause: parsed.rootCause ?? "Unknown",
+        confidence: Math.min(1, Math.max(0, parsed.confidence ?? 0.5)),
+        category: parsed.category ?? "unknown",
+        suggestedStrategies:
+          parsed.suggestedStrategies ?? ["rollback_simulation"],
+        reasoning: parsed.reasoning ?? "",
+      };
+    } catch {
+      return {
+        rootCause: "Failed to parse LLM diagnosis",
+        confidence: 0.3,
+        category: "unknown",
+        suggestedStrategies: ["rollback_simulation", "css_patch_targeted"],
+        reasoning:
+          "LLM response was not valid JSON. Falling back to default strategies.",
+      };
+    }
   }
-}
+);
 
 // ── Visual Assessment ────────────────────────────────────────────────
 
@@ -124,31 +151,36 @@ export interface VisualAssessment {
   details: string;
 }
 
-export async function assessPageVisually(
-  screenshotDescription: string,
-  domSummary: string,
-  profile: SiteProfile,
-  config: AgentConfig
-): Promise<VisualAssessment> {
-  const openai = getOpenAIClient(config);
+/**
+ * Assesses page visual integrity using LLM reasoning.
+ * Traced as a Weave op — appears as "assessPageVisually" in the trace tree.
+ */
+export const assessPageVisually = weave.op(
+  async function assessPageVisually(
+    screenshotDescription: string,
+    domSummary: string,
+    profile: SiteProfile,
+    config: AgentConfig
+  ): Promise<VisualAssessment> {
+    const openai = getOpenAIClient(config);
 
-  const expectedElements = profile.expectedElements
-    .map((e) => `- ${e.description}`)
-    .join("\n");
+    const expectedElements = profile.expectedElements
+      .map((e) => `- ${e.description}`)
+      .join("\n");
 
-  const response = await openai.chat.completions.create({
-    model: getModel(config),
-    temperature: 0.1,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `You are a visual QA agent evaluating whether a web page appears functional.
+    const response = await openai.chat.completions.create({
+      model: getModel(config),
+      temperature: 0.1,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `You are a visual QA agent evaluating whether a web page appears functional.
 You check for visual integrity, layout issues, and missing elements. Respond with JSON.`,
-      },
-      {
-        role: "user",
-        content: `Evaluate this page state:
+        },
+        {
+          role: "user",
+          content: `Evaluate this page state:
 
 Site: ${profile.name}
 Expected elements:
@@ -167,51 +199,58 @@ Respond with JSON:
   "overallScore": 0.0-1.0,
   "details": "Brief assessment"
 }`,
-      },
-    ],
-  });
+        },
+      ],
+    });
 
-  try {
-    const parsed = JSON.parse(response.choices[0].message.content ?? "{}");
-    return {
-      pageAppearsFunctional: parsed.pageAppearsFunctional ?? false,
-      issuesFound: parsed.issuesFound ?? [],
-      overallScore: Math.min(1, Math.max(0, parsed.overallScore ?? 0.5)),
-      details: parsed.details ?? "",
-    };
-  } catch {
-    return {
-      pageAppearsFunctional: false,
-      issuesFound: ["Failed to parse visual assessment"],
-      overallScore: 0.5,
-      details: "LLM assessment failed",
-    };
+    try {
+      const parsed = JSON.parse(response.choices[0].message.content ?? "{}");
+      return {
+        pageAppearsFunctional: parsed.pageAppearsFunctional ?? false,
+        issuesFound: parsed.issuesFound ?? [],
+        overallScore: Math.min(1, Math.max(0, parsed.overallScore ?? 0.5)),
+        details: parsed.details ?? "",
+      };
+    } catch {
+      return {
+        pageAppearsFunctional: false,
+        issuesFound: ["Failed to parse visual assessment"],
+        overallScore: 0.5,
+        details: "LLM assessment failed",
+      };
+    }
   }
-}
+);
 
 // ── Post-Mortem Summary ──────────────────────────────────────────────
 
-export async function generatePostMortem(
-  incident: Incident,
-  diagnosis: Diagnosis,
-  strategyUsed: string,
-  success: boolean,
-  config: AgentConfig
-): Promise<string> {
-  const openai = getOpenAIClient(config);
+/**
+ * Generates an LLM post-mortem summary of an incident.
+ * Traced as a Weave op — appears as "generatePostMortem" in the trace tree.
+ */
+export const generatePostMortem = weave.op(
+  async function generatePostMortem(
+    incident: Incident,
+    diagnosis: Diagnosis,
+    strategyUsed: string,
+    success: boolean,
+    config: AgentConfig
+  ): Promise<string> {
+    const openai = getOpenAIClient(config);
 
-  const response = await openai.chat.completions.create({
-    model: getModel(config),
-    temperature: 0.3,
-    max_tokens: 200,
-    messages: [
-      {
-        role: "system",
-        content: "Write concise post-mortem summaries for SRE incidents. One paragraph, focus on: what happened, root cause, how it was fixed, and what to watch for next time.",
-      },
-      {
-        role: "user",
-        content: `Summarize this incident:
+    const response = await openai.chat.completions.create({
+      model: getModel(config),
+      temperature: 0.3,
+      max_tokens: 200,
+      messages: [
+        {
+          role: "system",
+          content:
+            "Write concise post-mortem summaries for SRE incidents. One paragraph, focus on: what happened, root cause, how it was fixed, and what to watch for next time.",
+        },
+        {
+          role: "user",
+          content: `Summarize this incident:
 - Type: ${incident.type}
 - URL: ${incident.url}
 - Error: ${incident.errorMessage ?? "none"}
@@ -220,29 +259,36 @@ export async function generatePostMortem(
 - Strategy used: ${strategyUsed}
 - Success: ${success}
 - Reasoning: ${diagnosis.reasoning}`,
-      },
-    ],
-  });
+        },
+      ],
+    });
 
-  return (
-    response.choices[0].message.content ??
-    `Incident ${incident.id}: ${incident.type} at ${incident.url}. Fixed via ${strategyUsed}.`
-  );
-}
+    return (
+      response.choices[0].message.content ??
+      `Incident ${incident.id}: ${incident.type} at ${incident.url}. Fixed via ${strategyUsed}.`
+    );
+  }
+);
 
 // ── Embedding Generation ─────────────────────────────────────────────
 
-export async function generateEmbedding(
-  text: string,
-  config: AgentConfig
-): Promise<number[]> {
-  // Embeddings always use OpenAI — Cerebras doesn't support them
-  const openai = new OpenAI({ apiKey: config.openaiApiKey });
+/**
+ * Generates a vector embedding for semantic memory search.
+ * Uses text-embedding-3-small (always OpenAI, not Cerebras).
+ * Traced via Weave's wrapOpenAI.
+ */
+export const generateEmbedding = weave.op(
+  async function generateEmbedding(
+    text: string,
+    config: AgentConfig
+  ): Promise<number[]> {
+    const openai = getEmbeddingClient(config);
 
-  const response = await openai.embeddings.create({
-    model: "text-embedding-3-small",
-    input: text,
-  });
+    const response = await openai.embeddings.create({
+      model: "text-embedding-3-small",
+      input: text,
+    });
 
-  return response.data[0].embedding;
-}
+    return response.data[0].embedding;
+  }
+);

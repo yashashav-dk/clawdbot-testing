@@ -15,6 +15,7 @@ import {
   generateEmbedding,
   type Diagnosis,
 } from "./reasoning/llm.js";
+import { initWeave, runWeaveEvaluation } from "./tracing/weave.js";
 import type { Incident, IncidentMemory, AgentConfig } from "./types/index.js";
 import type { SiteProfile } from "./types/site-profile.js";
 import { SHOPDEMO_PROFILE } from "./types/site-profile.js";
@@ -52,6 +53,14 @@ export async function runAgentWithProfile(
   config?: AgentConfig
 ): Promise<RunResult> {
   const agentConfig = config ?? loadConfig();
+
+  // Initialize Weave tracing
+  try {
+    await initWeave(agentConfig);
+  } catch (err) {
+    console.warn("[SRE-DREAMER] Weave init failed — running without tracing");
+  }
+
   const memory = new IncidentMemoryStore(agentConfig.redisUrl);
 
   let memoryConnected = false;
@@ -177,6 +186,22 @@ export async function runAgentWithProfile(
       }
     } catch {}
   }
+
+  // Run Weave evaluation on dream results
+  try {
+    await runWeaveEvaluation(
+      dreamReport.dreams.map((d) => ({
+        strategy: d.strategy,
+        scores: {
+          reachability: d.success ? 1.0 : 0.0,
+          visualIntegrity: d.score,
+          safety: d.sideEffects.length === 0 ? 1.0 : 0.5,
+          latency: d.durationMs < 30000 ? 1.0 : 0.5,
+          aggregate: d.score,
+        },
+      }))
+    );
+  } catch {}
 
   if (!dreamReport.bestStrategy) {
     console.log("\n[DREAM] No viable remediation strategy found.");

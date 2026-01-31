@@ -1,3 +1,4 @@
+import * as weave from "weave";
 import { Stagehand } from "@browserbasehq/stagehand";
 import type {
   Incident,
@@ -37,7 +38,8 @@ export interface PerceptionResult {
   timestamp: string;
 }
 
-export async function runPerception(
+export const runPerception = weave.op(
+  async function runPerception(
   profile: SiteProfile,
   config: AgentConfig
 ): Promise<PerceptionResult> {
@@ -62,7 +64,7 @@ export async function runPerception(
     sessionReplayUrl: stagehandResult.sessionReplayUrl,
     timestamp,
   };
-}
+});
 
 async function checkHttpHealth(
   url: string

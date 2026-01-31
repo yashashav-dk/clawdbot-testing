@@ -25,10 +25,12 @@ async function main() {
   switch (command) {
     case "detect": {
       const { loadConfig } = await import("./config.js");
+      const { initWeave } = await import("./tracing/weave.js");
       const { runPerception } = await import("./perception/detector.js");
       const { SHOPDEMO_PROFILE } = await import("./types/site-profile.js");
 
       const config = loadConfig();
+      try { await initWeave(config); } catch {}
       const profile = { ...SHOPDEMO_PROFILE, url: config.targetUrl };
 
       console.log(`[CLI] Running perception on ${profile.name} (${profile.url})\n`);

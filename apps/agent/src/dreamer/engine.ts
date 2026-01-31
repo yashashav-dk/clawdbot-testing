@@ -1,3 +1,4 @@
+import * as weave from "weave";
 import { Stagehand } from "@browserbasehq/stagehand";
 import type {
   Incident,
@@ -38,7 +39,8 @@ export interface DreamReport {
   totalDurationMs: number;
 }
 
-export async function runDreamCycle(
+export const runDreamCycle = weave.op(
+  async function runDreamCycle(
   incident: Incident,
   pastIncidents: IncidentMemory[],
   profile: SiteProfile,
@@ -115,7 +117,7 @@ export async function runDreamCycle(
   }
 
   return report;
-}
+});
 
 interface StrategyDef {
   name: string;
@@ -190,7 +192,8 @@ function selectStrategies(
   return strategies.sort((a, b) => a.priority - b.priority);
 }
 
-async function executeDream(
+const executeDream = weave.op(
+  async function executeDream(
   strategy: StrategyDef,
   context: DreamContext,
   profile: SiteProfile,
@@ -363,4 +366,4 @@ async function executeDream(
   } finally {
     await stagehand.close().catch(() => {});
   }
-}
+});
