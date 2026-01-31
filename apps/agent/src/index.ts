@@ -127,7 +127,9 @@ export async function runAgentWithProfile(
   if (memoryConnected) {
     try {
       await memory.startThread(incident.id, incident);
-    } catch {}
+    } catch (err) {
+      console.warn("[MEMORY] Failed to start incident thread:", (err as Error)?.message);
+    }
   }
 
   // ── Phase 2: DREAM (includes LLM diagnosis) ───────────────────────
@@ -145,7 +147,9 @@ export async function runAgentWithProfile(
           `${incident.type}: ${incident.description}`,
           agentConfig
         );
-      } catch {}
+      } catch (err) {
+        console.warn("[DREAM] Embedding generation failed — falling back to type match:", (err as Error)?.message);
+      }
 
       pastIncidents = await memory.findSimilarIncidents(
         incident.type,
@@ -163,7 +167,9 @@ export async function runAgentWithProfile(
       } else {
         console.log("[DREAM] No past incidents found — this is a novel event");
       }
-    } catch {}
+    } catch (err) {
+      console.warn("[DREAM] Memory lookup failed:", (err as Error)?.message);
+    }
   }
 
   const dreamReport = await runDreamCycle(
@@ -184,7 +190,9 @@ export async function runAgentWithProfile(
           sessionUrl: dream.sessionUrl,
         });
       }
-    } catch {}
+    } catch (err) {
+      console.warn("[MEMORY] Failed to log dream results:", (err as Error)?.message);
+    }
   }
 
   // Run Weave evaluation on dream results
@@ -201,7 +209,9 @@ export async function runAgentWithProfile(
         },
       }))
     );
-  } catch {}
+  } catch (err) {
+    console.warn("[WEAVE] Evaluation failed:", (err as Error)?.message);
+  }
 
   if (!dreamReport.bestStrategy) {
     console.log("\n[DREAM] No viable remediation strategy found.");
@@ -296,7 +306,9 @@ export async function runAgentWithProfile(
         console.log(
           `[LEARN] Generated embedding (${embedding.length} dimensions)`
         );
-      } catch {}
+      } catch (err) {
+        console.warn("[LEARN] Embedding generation failed:", (err as Error)?.message);
+      }
 
       const incidentMemory: IncidentMemory = {
         incidentId: incident.id,
@@ -324,7 +336,9 @@ export async function runAgentWithProfile(
 
     try {
       await memory.disconnect();
-    } catch {}
+    } catch (err) {
+      console.warn("[MEMORY] Disconnect failed:", (err as Error)?.message);
+    }
   }
 
   // ── Summary ────────────────────────────────────────────────────────
