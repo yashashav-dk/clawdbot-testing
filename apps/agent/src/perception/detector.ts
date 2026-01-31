@@ -290,9 +290,23 @@ async function verifyFlowResult(
     }
 
     case "network": {
-      // Network verification would need request interception setup
-      // For now, return true if the action didn't throw
-      return true;
+      // Check the browser's Performance API for matching network requests
+      // made during or after the action execution
+      try {
+        const found = await page.evaluate(
+          (opts: { urlPattern: string; method: string }) => {
+            const entries = performance.getEntriesByType(
+              "resource"
+            ) as PerformanceResourceTiming[];
+            const pattern = new RegExp(opts.urlPattern);
+            return entries.some((entry) => pattern.test(entry.name));
+          },
+          { urlPattern: verification.urlPattern, method: verification.method }
+        );
+        return found;
+      } catch {
+        return false;
+      }
     }
 
     default:
