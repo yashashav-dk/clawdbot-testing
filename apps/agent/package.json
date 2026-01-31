@@ -1,0 +1,28 @@
+{
+  "name": "sre-dreamer-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "detect": "tsx src/cli.ts detect",
+    "dream": "tsx src/cli.ts dream",
+    "demo": "tsx src/cli.ts demo"
+  },
+  "dependencies": {
+    "@browserbasehq/sdk": "^2.0.0",
+    "@browserbasehq/stagehand": "^2.0.0",
+    "dotenv": "^16.4.0",
+    "ioredis": "^5.4.0",
+    "openai": "^4.60.0",
+    "weave": "^0.5.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.16.0",
+    "typescript": "^5.4.0"
+  }
+}
