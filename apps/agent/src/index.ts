@@ -97,7 +97,7 @@ export async function runAgentWithProfile(
   for (const flow of perception.flowResults) {
     const icon = flow.passed ? "PASS" : "FAIL";
     console.log(
-      `[PERCEIVE] Flow "${flow.name}": ${icon}${flow.occlusionDetected ? " (OCCLUSION DETECTED)" : ""}${flow.blockingElement ? ` [blocker: ${flow.blockingElement}]` : ""} (${flow.durationMs}ms)`
+      `[PERCEIVE] Flow "${flow.flow.name}": ${icon}${flow.occlusionDetected ? " (OCCLUSION DETECTED)" : ""}${flow.blockingElement ? ` [blocker: ${flow.blockingElement}]` : ""} (${flow.durationMs}ms)`
     );
   }
 

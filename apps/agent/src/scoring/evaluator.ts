@@ -1,8 +1,7 @@
 import * as weave from "weave";
-import { Stagehand } from "@browserbasehq/stagehand";
-import type { DreamResult, AgentConfig } from "../types/index.js";
+import type { AgentConfig } from "../types/index.js";
 import type { SiteProfile, CriticalFlow } from "../types/site-profile.js";
-import { assessPageVisually, type VisualAssessment } from "../reasoning/llm.js";
+import { assessPageVisually } from "../reasoning/llm.js";
 import { captureDomSnapshot } from "../perception/detector.js";
 
 /**
