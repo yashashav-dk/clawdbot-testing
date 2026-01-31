@@ -12,7 +12,8 @@
     "demo": "tsx src/cli.ts demo",
     "scan": "tsx src/cli.ts scan",
     "memory": "tsx src/cli.ts memory",
-    "memory:stats": "tsx src/cli.ts memory:stats"
+    "memory:stats": "tsx src/cli.ts memory:stats",
+    "test": "tsx src/test/integration.test.ts"
   },
   "dependencies": {
     "@browserbasehq/sdk": "^2.0.0",
