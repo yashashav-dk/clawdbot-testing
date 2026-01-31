@@ -74,12 +74,13 @@ export interface AgentConfig {
   targetUrl: string;
   browserbaseApiKey: string;
   browserbaseProjectId: string;
+  openaiApiKey: string;
+  // Optional — degrade gracefully if not provided
   vercelToken: string;
   vercelProjectId: string;
   vercelTeamId?: string;
   vercelGoodDeploymentId: string;
   redisUrl: string;
-  openaiApiKey: string;
   weaveProject: string;
   cerebrasApiKey?: string;
 }
