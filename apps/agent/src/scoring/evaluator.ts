@@ -1,22 +1,24 @@
 import { Stagehand } from "@browserbasehq/stagehand";
 import type { DreamResult, AgentConfig } from "../types/index.js";
+import type { SiteProfile, CriticalFlow } from "../types/site-profile.js";
+import { assessPageVisually, type VisualAssessment } from "../reasoning/llm.js";
+import { captureDomSnapshot } from "../perception/detector.js";
 
 /**
  * The Scoring Layer.
  *
- * Evaluates dream results across multiple dimensions:
- * - Reachability: Can the user click the login button?
- * - Visual integrity: Does the page still look correct?
- * - Latency: How fast was the fix?
- * - Safety: Did the fix cause any side effects?
+ * Evaluates dream results across multiple dimensions. Works generically
+ * for any site profile — uses both DOM checks (fast, reliable) and
+ * LLM-based visual assessment (flexible, works on any page).
  */
 
 export interface ScoreBreakdown {
-  reachability: number; // 0-1: Did the login button become clickable?
-  visualIntegrity: number; // 0-1: Are key page elements still present?
-  latency: number; // 0-1: Normalized speed score
-  safety: number; // 0-1: No destructive side effects?
-  aggregate: number; // Weighted average
+  reachability: number;
+  visualIntegrity: number;
+  latency: number;
+  safety: number;
+  aggregate: number;
+  details: Record<string, any>;
 }
 
 const WEIGHTS = {
@@ -37,99 +39,244 @@ export function computeScore(breakdown: ScoreBreakdown): number {
 
 /**
  * Runs a full evaluation of a page state after a remediation attempt.
- * This is called within each dream simulation to score the result.
+ * Uses the site profile to know what to check.
  */
 export async function evaluatePageHealth(
-  page: any
+  page: any,
+  profile?: SiteProfile,
+  config?: AgentConfig
 ): Promise<ScoreBreakdown> {
-  const reachability = await checkReachability(page);
-  const visualIntegrity = await checkVisualIntegrity(page);
-  const safety = await checkSafety(page);
+  const details: Record<string, any> = {};
 
-  // Latency is scored externally based on duration
+  // Reachability: test critical flows
+  const reachability = profile
+    ? await checkFlowReachability(page, profile, details)
+    : await checkBasicReachability(page, details);
+
+  // Visual integrity: check expected elements + LLM assessment
+  const visualIntegrity = profile
+    ? await checkProfileVisualIntegrity(page, profile, config, details)
+    : await checkBasicVisualIntegrity(page, details);
+
+  // Safety: check for destructive side effects
+  const safety = await checkSafety(page, details);
+
   const breakdown: ScoreBreakdown = {
     reachability,
     visualIntegrity,
-    latency: 1.0, // Placeholder — set by caller based on timing
+    latency: 1.0,
     safety,
     aggregate: 0,
+    details,
   };
 
   breakdown.aggregate = computeScore(breakdown);
   return breakdown;
 }
 
-async function checkReachability(page: any): Promise<number> {
+// ── Reachability Checks ──────────────────────────────────────────────
+
+async function checkFlowReachability(
+  page: any,
+  profile: SiteProfile,
+  details: Record<string, any>
+): Promise<number> {
+  const flowResults: Record<string, boolean> = {};
+  let totalWeight = 0;
+  let passedWeight = 0;
+
+  for (const flow of profile.criticalFlows) {
+    const passed = await testFlowInPage(page, flow);
+    flowResults[flow.name] = passed;
+    totalWeight += flow.priority;
+    if (passed) passedWeight += flow.priority;
+  }
+
+  details.flowResults = flowResults;
+  return totalWeight > 0 ? passedWeight / totalWeight : 0;
+}
+
+async function testFlowInPage(page: any, flow: CriticalFlow): Promise<boolean> {
+  if (flow.verification.type !== "selector") {
+    // For non-selector verifications, do a basic click test
+    return checkBasicClickability(page);
+  }
+
   try {
-    // Try clicking the login button via direct Playwright action
-    await page.click('[data-testid="login-btn"]', { timeout: 5000 });
+    // For selector-based flows, check if the target element is clickable
+    const selector = flow.verification.selector;
+    await page.click(selector, { timeout: 5000 });
 
-    // Check if the success message appeared
-    const success = await page
-      .locator('[data-testid="login-success"]')
-      .isVisible({ timeout: 2000 })
-      .catch(() => false);
-
-    return success ? 1.0 : 0.3;
+    // Check if selector verification element appeared
+    if (flow.verification.expectVisible) {
+      return await page
+        .locator(selector)
+        .isVisible({ timeout: 2000 })
+        .catch(() => false);
+    }
+    return true;
   } catch {
-    return 0.0;
+    return false;
   }
 }
 
-async function checkVisualIntegrity(page: any): Promise<number> {
+async function checkBasicReachability(
+  page: any,
+  details: Record<string, any>
+): Promise<number> {
+  const clickable = await checkBasicClickability(page);
+  details.basicClickable = clickable;
+  return clickable ? 1.0 : 0.0;
+}
+
+async function checkBasicClickability(page: any): Promise<boolean> {
+  try {
+    // Try clicking the first button or link found on the page
+    const clickable = await page.evaluate(() => {
+      const btn =
+        document.querySelector("button") ??
+        document.querySelector('a[href]') ??
+        document.querySelector('[role="button"]');
+      if (!btn) return false;
+
+      const rect = btn.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      const topEl = document.elementFromPoint(x, y);
+      return topEl === btn || btn.contains(topEl);
+    });
+    return clickable;
+  } catch {
+    return false;
+  }
+}
+
+// ── Visual Integrity ─────────────────────────────────────────────────
+
+async function checkProfileVisualIntegrity(
+  page: any,
+  profile: SiteProfile,
+  config: AgentConfig | undefined,
+  details: Record<string, any>
+): Promise<number> {
+  const elementChecks: Record<string, boolean> = {};
+  let passed = 0;
+  let total = 0;
+
+  // Check expected elements from profile
+  for (const expected of profile.expectedElements) {
+    total++;
+    if (expected.selector) {
+      try {
+        const exists =
+          (await page.locator(expected.selector).count()) > 0;
+        elementChecks[expected.description] = exists;
+        if (exists) passed++;
+      } catch {
+        elementChecks[expected.description] = false;
+      }
+    } else {
+      // Without a selector, ask the LLM (if config available)
+      // For now, give partial credit
+      elementChecks[expected.description] = true;
+      passed += 0.5;
+    }
+  }
+
+  // If no expected elements defined, fall back to generic checks
+  if (total === 0) {
+    return checkBasicVisualIntegrity(page, details);
+  }
+
+  // Optionally run LLM visual assessment for richer scoring
+  if (config) {
+    try {
+      const domSummary = await captureDomSnapshot(page);
+      const assessment = await assessPageVisually(
+        "Page state after remediation attempt",
+        domSummary,
+        profile,
+        config
+      );
+      details.llmAssessment = assessment;
+
+      // Blend DOM check results with LLM assessment
+      const domScore = total > 0 ? passed / total : 0.5;
+      return domScore * 0.6 + assessment.overallScore * 0.4;
+    } catch {
+      // LLM assessment failed, use DOM checks only
+    }
+  }
+
+  details.elementChecks = elementChecks;
+  return total > 0 ? passed / total : 0.5;
+}
+
+async function checkBasicVisualIntegrity(
+  page: any,
+  details: Record<string, any>
+): Promise<number> {
   try {
     const checks = await page.evaluate(() => {
       const results: Record<string, boolean> = {};
-
-      // Check key elements exist
-      results.header = !!document.querySelector("header");
-      results.footer = !!document.querySelector("footer");
-      results.mainContent = !!document.querySelector("main");
-      results.loginBtn = !!document.querySelector('[data-testid="login-btn"]');
-      results.healthOk = !!document.querySelector('[data-testid="health-ok"]');
-
-      // Check no blank page
-      results.hasContent = document.body.innerText.length > 50;
-
+      results.hasHeader =
+        !!document.querySelector("header") ||
+        !!document.querySelector("nav") ||
+        !!document.querySelector('[role="banner"]');
+      results.hasMainContent =
+        !!document.querySelector("main") ||
+        !!document.querySelector('[role="main"]') ||
+        document.body.children.length > 2;
+      results.hasText = document.body.innerText.length > 50;
+      results.notBlank = document.body.innerHTML.length > 100;
       return results;
     });
 
+    details.visualChecks = checks;
     const passed = Object.values(checks).filter(Boolean).length;
-    const total = Object.values(checks).length;
-    return passed / total;
+    return passed / Object.keys(checks).length;
   } catch {
     return 0.0;
   }
 }
 
-async function checkSafety(page: any): Promise<number> {
+// ── Safety Checks ────────────────────────────────────────────────────
+
+async function checkSafety(
+  page: any,
+  details: Record<string, any>
+): Promise<number> {
   try {
     const issues = await page.evaluate(() => {
       const problems: string[] = [];
 
-      // Check for JS errors visible in the DOM
       if (document.body.innerText.includes("Unhandled Runtime Error")) {
         problems.push("runtime_error");
       }
-
-      // Check for blank/destroyed page
+      if (document.body.innerText.includes("Application error")) {
+        problems.push("application_error");
+      }
       if (document.body.children.length < 2) {
         problems.push("page_destroyed");
       }
-
-      // Check console for critical errors (limited to what's in DOM)
       if (document.querySelectorAll("[role='alert']").length > 0) {
         problems.push("error_alerts");
+      }
+      // Check for hydration errors (React)
+      if (document.body.innerText.includes("Hydration failed")) {
+        problems.push("hydration_error");
       }
 
       return problems;
     });
 
+    details.safetyIssues = issues;
+
     if (issues.length === 0) return 1.0;
     if (issues.includes("page_destroyed")) return 0.0;
     return Math.max(0, 1.0 - issues.length * 0.3);
   } catch {
-    return 0.5; // Can't evaluate = uncertain
+    return 0.5;
   }
 }
 

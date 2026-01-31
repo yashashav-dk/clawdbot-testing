@@ -1,6 +1,6 @@
 {
   "name": "sre-dreamer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "SRE Dreamer: Autonomous visual regression detection and remediation agent",
   "workspaces": [
@@ -15,7 +15,10 @@
     "agent:detect": "npm run detect --workspace=apps/agent",
     "agent:dream": "npm run dream --workspace=apps/agent",
     "agent:run": "npm run start --workspace=apps/agent",
-    "demo": "npm run demo --workspace=apps/agent"
+    "demo": "npm run demo --workspace=apps/agent",
+    "agent:scan": "npm run scan --workspace=apps/agent --",
+    "agent:memory": "npm run memory --workspace=apps/agent",
+    "agent:memory:stats": "npm run memory:stats --workspace=apps/agent"
   },
   "engines": {
     "node": ">=18.0.0"

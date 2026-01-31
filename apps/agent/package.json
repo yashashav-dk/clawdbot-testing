@@ -1,6 +1,6 @@
 {
   "name": "sre-dreamer-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +9,10 @@
     "start": "tsx src/index.ts",
     "detect": "tsx src/cli.ts detect",
     "dream": "tsx src/cli.ts dream",
-    "demo": "tsx src/cli.ts demo"
+    "demo": "tsx src/cli.ts demo",
+    "scan": "tsx src/cli.ts scan",
+    "memory": "tsx src/cli.ts memory",
+    "memory:stats": "tsx src/cli.ts memory:stats"
   },
   "dependencies": {
     "@browserbasehq/sdk": "^2.0.0",

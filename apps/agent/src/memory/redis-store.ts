@@ -1,18 +1,20 @@
 import Redis from "ioredis";
-import type { IncidentMemory, Incident } from "../types/index.js";
+import type { IncidentMemory, Incident, AgentConfig } from "../types/index.js";
 
 /**
  * The Memory Layer.
  *
  * Redis-backed storage for incident history and learned remediation strategies.
- * Implements both short-term context (active incident thread) and long-term
- * knowledge (past incident memories for retrieval).
+ * Implements:
+ * - Short-term context (active incident thread)
+ * - Long-term knowledge (past incident memories)
+ * - Vector embeddings for semantic similarity search (self-improving)
  */
 
-const INCIDENT_PREFIX = "sre:incident:";
 const MEMORY_PREFIX = "sre:memory:";
 const THREAD_PREFIX = "sre:thread:";
 const MEMORY_INDEX = "sre:memories";
+const EMBEDDING_PREFIX = "sre:embedding:";
 
 export class IncidentMemoryStore {
   private redis: Redis;
@@ -42,7 +44,6 @@ export class IncidentMemoryStore {
       status: "active",
       attempts: "0",
     });
-    // Auto-expire threads after 1 hour
     await this.redis.expire(key, 3600);
   }
 
@@ -86,7 +87,10 @@ export class IncidentMemoryStore {
 
   // === Long-term knowledge: Incident memories ===
 
-  async storeMemory(memory: IncidentMemory): Promise<void> {
+  async storeMemory(
+    memory: IncidentMemory,
+    embedding?: number[]
+  ): Promise<void> {
     const key = `${MEMORY_PREFIX}${memory.incidentId}`;
     await this.redis.hset(key, {
       data: JSON.stringify(memory),
@@ -94,7 +98,16 @@ export class IncidentMemoryStore {
       score: String(memory.score),
       timestamp: memory.timestamp,
     });
-    // Add to the sorted set for retrieval, scored by recency
+
+    // Store embedding separately if provided
+    if (embedding && embedding.length > 0) {
+      await this.redis.set(
+        `${EMBEDDING_PREFIX}${memory.incidentId}`,
+        JSON.stringify(embedding)
+      );
+      memory.embedding = embedding;
+    }
+
     await this.redis.zadd(
       MEMORY_INDEX,
       Date.parse(memory.timestamp),
@@ -116,15 +129,50 @@ export class IncidentMemoryStore {
     return memories;
   }
 
+  /**
+   * Find similar incidents using vector cosine similarity.
+   * Falls back to type-based matching if embeddings aren't available.
+   */
   async findSimilarIncidents(
     type: string,
+    queryEmbedding?: number[],
     limit = 5
   ): Promise<IncidentMemory[]> {
-    // Simple type-based retrieval. In production, this would use
-    // RedisVL vector similarity search with embeddings.
     const allIds = await this.redis.zrevrange(MEMORY_INDEX, 0, 50);
-    const matches: IncidentMemory[] = [];
 
+    if (queryEmbedding && queryEmbedding.length > 0) {
+      // Vector similarity search
+      const scored: Array<{ memory: IncidentMemory; similarity: number }> = [];
+
+      for (const id of allIds) {
+        const [memoryData, embeddingData] = await Promise.all([
+          this.redis.hget(`${MEMORY_PREFIX}${id}`, "data"),
+          this.redis.get(`${EMBEDDING_PREFIX}${id}`),
+        ]);
+
+        if (!memoryData) continue;
+
+        const memory: IncidentMemory = JSON.parse(memoryData);
+
+        if (embeddingData) {
+          const storedEmbedding: number[] = JSON.parse(embeddingData);
+          const similarity = cosineSimilarity(queryEmbedding, storedEmbedding);
+          scored.push({ memory, similarity });
+        } else {
+          // No embedding — give partial score if type matches
+          scored.push({
+            memory,
+            similarity: memory.type === type ? 0.5 : 0.1,
+          });
+        }
+      }
+
+      scored.sort((a, b) => b.similarity - a.similarity);
+      return scored.slice(0, limit).map((s) => s.memory);
+    }
+
+    // Fallback: type-based matching
+    const matches: IncidentMemory[] = [];
     for (const id of allIds) {
       const entry = await this.redis.hgetall(`${MEMORY_PREFIX}${id}`);
       if (entry.type === type && entry.data) {
@@ -140,7 +188,26 @@ export class IncidentMemoryStore {
     return this.redis.zcard(MEMORY_INDEX);
   }
 
-  // === Utility ===
+  async getMemoryStats(): Promise<{
+    total: number;
+    byType: Record<string, number>;
+    withEmbeddings: number;
+  }> {
+    const allIds = await this.redis.zrevrange(MEMORY_INDEX, 0, -1);
+    const byType: Record<string, number> = {};
+    let withEmbeddings = 0;
+
+    for (const id of allIds) {
+      const entry = await this.redis.hgetall(`${MEMORY_PREFIX}${id}`);
+      if (entry.type) {
+        byType[entry.type] = (byType[entry.type] ?? 0) + 1;
+      }
+      const hasEmbed = await this.redis.exists(`${EMBEDDING_PREFIX}${id}`);
+      if (hasEmbed) withEmbeddings++;
+    }
+
+    return { total: allIds.length, byType, withEmbeddings };
+  }
 
   async ping(): Promise<boolean> {
     try {
@@ -150,4 +217,27 @@ export class IncidentMemoryStore {
       return false;
     }
   }
+}
+
+/**
+ * Cosine similarity between two vectors.
+ * Returns a value between -1 and 1 (1 = identical direction).
+ */
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length) return 0;
+
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+
+  for (let i = 0; i < a.length; i++) {
+    dotProduct += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+
+  const denominator = Math.sqrt(normA) * Math.sqrt(normB);
+  if (denominator === 0) return 0;
+
+  return dotProduct / denominator;
 }
