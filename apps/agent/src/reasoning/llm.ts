@@ -153,34 +153,30 @@ export interface VisualAssessment {
 
 /**
  * Assesses page visual integrity using LLM reasoning.
+ * When a screenshot is provided, uses gpt-4o vision to literally see the page.
+ * Falls back to DOM-only analysis when no screenshot is available.
  * Traced as a Weave op — appears as "assessPageVisually" in the trace tree.
  */
 export const assessPageVisually = weave.op(
   async function assessPageVisually(
-    screenshotDescription: string,
+    screenshotBase64: string | null,
     domSummary: string,
     profile: SiteProfile,
     config: AgentConfig
   ): Promise<VisualAssessment> {
-    const openai = getOpenAIClient(config);
+    // Vision requires gpt-4o (not Cerebras) — use OpenAI directly for this call
+    const visionClient = screenshotBase64
+      ? (() => {
+          const base = new OpenAI({ apiKey: config.openaiApiKey });
+          try { return weave.wrapOpenAI(base); } catch { return base; }
+        })()
+      : getOpenAIClient(config);
 
     const expectedElements = profile.expectedElements
       .map((e) => `- ${e.description}`)
       .join("\n");
 
-    const response = await openai.chat.completions.create({
-      model: getModel(config),
-      temperature: 0.1,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: `You are a visual QA agent evaluating whether a web page appears functional.
-You check for visual integrity, layout issues, and missing elements. Respond with JSON.`,
-        },
-        {
-          role: "user",
-          content: `Evaluate this page state:
+    const userPrompt = `Evaluate this page state:
 
 Site: ${profile.name}
 Expected elements:
@@ -189,16 +185,49 @@ ${expectedElements || "- (none specified — use general web page expectations)"
 Page DOM summary:
 ${domSummary.slice(0, 3000)}
 
-Page description/state:
-${screenshotDescription}
-
 Respond with JSON:
 {
   "pageAppearsFunctional": true/false,
   "issuesFound": ["list of issues"],
   "overallScore": 0.0-1.0,
   "details": "Brief assessment"
-}`,
+}`;
+
+    // Build message content — include screenshot if available
+    const userContent: any[] = [];
+
+    if (screenshotBase64) {
+      userContent.push({
+        type: "image_url",
+        image_url: {
+          url: `data:image/png;base64,${screenshotBase64}`,
+          detail: "low", // low detail keeps tokens reasonable
+        },
+      });
+      userContent.push({
+        type: "text",
+        text: userPrompt,
+      });
+    } else {
+      userContent.push({
+        type: "text",
+        text: userPrompt,
+      });
+    }
+
+    const response = await visionClient.chat.completions.create({
+      model: screenshotBase64 ? "gpt-4o" : getModel(config),
+      temperature: 0.1,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `You are a visual QA agent evaluating whether a web page appears functional.
+You check for visual integrity, layout issues, and missing elements.${screenshotBase64 ? " You have been given a screenshot of the page — analyze it carefully for overlays, obscured elements, blank regions, or anything visually wrong." : ""} Respond with JSON.`,
+        },
+        {
+          role: "user",
+          content: userContent,
         },
       ],
     });

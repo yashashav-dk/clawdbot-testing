@@ -189,17 +189,29 @@ async function checkProfileVisualIntegrity(
     return checkBasicVisualIntegrity(page, details);
   }
 
-  // Optionally run LLM visual assessment for richer scoring
+  // Run LLM visual assessment with actual screenshot for richer scoring
   if (config) {
     try {
       const domSummary = await captureDomSnapshot(page);
+
+      // Capture a real screenshot for gpt-4o vision analysis
+      let screenshotBase64: string | null = null;
+      try {
+        const screenshotBuffer = await page.screenshot({ type: "png", fullPage: false });
+        screenshotBase64 = screenshotBuffer.toString("base64");
+        details.screenshotCaptured = true;
+      } catch {
+        details.screenshotCaptured = false;
+      }
+
       const assessment = await assessPageVisually(
-        "Page state after remediation attempt",
+        screenshotBase64,
         domSummary,
         profile,
         config
       );
       details.llmAssessment = assessment;
+      details.usedVision = !!screenshotBase64;
 
       // Blend DOM check results with LLM assessment
       const domScore = total > 0 ? passed / total : 0.5;

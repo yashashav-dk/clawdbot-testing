@@ -24,6 +24,7 @@ export interface FlowTestResult {
   blockingElement?: string;
   errorMessage?: string;
   domSnapshot?: string;
+  screenshotBase64?: string;
   durationMs: number;
 }
 
@@ -34,6 +35,7 @@ export interface PerceptionResult {
   httpHealthy: boolean;
   flowResults: FlowTestResult[];
   domSnapshot: string;
+  screenshotBase64?: string;
   sessionReplayUrl?: string;
   timestamp: string;
 }
@@ -61,6 +63,7 @@ export const runPerception = weave.op(
     httpHealthy: httpResult.healthy,
     flowResults: stagehandResult.flowResults,
     domSnapshot: stagehandResult.domSnapshot,
+    screenshotBase64: stagehandResult.screenshotBase64,
     sessionReplayUrl: stagehandResult.sessionReplayUrl,
     timestamp,
   };
@@ -90,6 +93,7 @@ async function checkHttpHealth(
 interface StagehandFlowResult {
   flowResults: FlowTestResult[];
   domSnapshot: string;
+  screenshotBase64?: string;
   sessionReplayUrl?: string;
 }
 
@@ -134,6 +138,13 @@ async function runStagehandFlowChecks(
       }
     }
 
+    // Capture a screenshot of the page state for visual evidence
+    let screenshotBase64: string | undefined;
+    try {
+      const buf = await page.screenshot({ type: "png", fullPage: false });
+      screenshotBase64 = buf.toString("base64");
+    } catch {}
+
     // Get session replay URL from Browserbase
     let sessionReplayUrl: string | undefined;
     try {
@@ -147,7 +158,7 @@ async function runStagehandFlowChecks(
         : undefined;
     } catch {}
 
-    return { flowResults, domSnapshot, sessionReplayUrl };
+    return { flowResults, domSnapshot, screenshotBase64, sessionReplayUrl };
   } finally {
     await stagehand.close().catch(() => {});
   }
@@ -179,11 +190,20 @@ async function testCriticalFlow(
 
     // Action didn't throw but verification failed — possible occlusion
     const blockingElement = await identifyBlockingElement(page, flow);
+
+    // Capture screenshot as visual evidence of the failure
+    let screenshotBase64: string | undefined;
+    try {
+      const buf = await page.screenshot({ type: "png", fullPage: false });
+      screenshotBase64 = buf.toString("base64");
+    } catch {}
+
     return {
       flow,
       passed: false,
       occlusionDetected: !!blockingElement,
       blockingElement,
+      screenshotBase64,
       errorMessage: "Action completed but verification failed — element may be visually present but non-interactive",
       durationMs: Date.now() - start,
     };
@@ -200,9 +220,15 @@ async function testCriticalFlow(
     let blockingElement: string | undefined;
     let domSnapshot: string | undefined;
 
+    let screenshotBase64: string | undefined;
     if (isOcclusion) {
       blockingElement = await identifyBlockingElement(page, flow);
       domSnapshot = await captureDomSnapshot(page);
+      // Capture screenshot as evidence of the occlusion
+      try {
+        const buf = await page.screenshot({ type: "png", fullPage: false });
+        screenshotBase64 = buf.toString("base64");
+      } catch {}
     }
 
     return {
@@ -212,6 +238,7 @@ async function testCriticalFlow(
       blockingElement,
       errorMessage: msg,
       domSnapshot,
+      screenshotBase64,
       durationMs: Date.now() - start,
     };
   }
